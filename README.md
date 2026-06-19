@@ -1,6 +1,4 @@
 # Topocrafter
-# topoCrafter
-
 A co-simulation framework for **Dragonfly+ hybrid data-center networks** that combines an **OMNeT++ packet-level simulator** with an optional **Python deep reinforcement learning (DRL) agent** for MEMS optical topology reconfiguration and inter-pod routing.
 
 ## Overview
