@@ -1,0 +1,285 @@
+#include "MEMS_Switch.h"
+#include <cstdlib>  // std::rand, std::srand
+#include <ctime>    // std::time
+#include <cmath>    // std::log, std::sqrt, std::cos
+#include <algorithm>  // std::max
+#include <iostream>   // 用于调试输出
+
+namespace dragonflyplus {
+
+Define_Module(MEMS_Switch);
+
+void MEMS_Switch::initialize()
+{
+    // 初始化随机数种子
+    std::srand(static_cast<unsigned int>(std::time(0)));  // 使用当前时间作为种子
+
+    numOfGate = gateSize("Pod");
+    outputGate.assign(numOfGate, -1);
+    portSend.assign(numOfGate, 0);
+    pod_traffic.resize(numOfGate);
+    for (int i = 0; i < numOfGate; i++) {
+        pod_traffic[i].assign(numOfGate, 0);
+    }
+
+    // 初始化闪断参数
+    portActive.assign(numOfGate, true);  // 所有端口初始化为活动状态
+    blinkInterval = par("blinkInterval").doubleValue();          // 平均闪断间隔
+    blinkDuration = par("blinkDuration").doubleValue();          // 平均闪断持续时间
+    blinkDistribution = par("blinkDistribution").stringValue(); // 分布类型
+
+    blinkMessage = new cMessage("blink");
+
+    // 调度第一次闪断
+    scheduleAt(simTime() + getNextBlinkInterval(), blinkMessage);
+}
+
+void MEMS_Switch::handleMessage(cMessage *msg)
+{
+    if (msg == blinkMessage) {
+        togglePortState();  // 切换端口状态
+
+        // 调度下一次闪断或恢复
+        if (std::any_of(portActive.begin(), portActive.end(), [](bool active) { return !active; })) {
+            // 当前有端口处于闪断状态，调度恢复
+            scheduleAt(simTime() + getNextBlinkDuration(), blinkMessage);
+        } else {
+            // 所有端口活动，调度下一次闪断
+            scheduleAt(simTime() + getNextBlinkInterval(), blinkMessage);
+        }
+        return;
+    }
+
+    if (msg->arrivedOn("MEMS_Controller$i")) {
+        setupMsg *pkt = dynamic_cast<setupMsg *>(msg);
+        std::vector<int> temp = pkt->getConfiguration();
+        for (int i = 0; i < numOfGate; i++) {
+            outputGate[i] = temp[i];
+        }
+        delete pkt;
+    } else {
+        int inGateIndex = msg->getArrivalGate()->getIndex();
+        portSend[inGateIndex]++;
+
+        // 检查端口是否处于活动状态（闪断逻辑）
+        if (!portActive[inGateIndex]) {
+            delete msg;  // 丢弃消息
+            return;
+        }
+
+        int outGateIndex = outputGate[inGateIndex];
+        pod_traffic[inGateIndex][outGateIndex]++;
+        dataMsg *pkt = dynamic_cast<dataMsg *>(msg);
+        int length = pkt->getPathLength();
+        pkt->setPathLength(length + 1);
+        if (outGateIndex < 0 || outGateIndex >= numOfGate)
+            error("Error in MEMS!!! Cannot send this msg %s", msg->getName());
+        send(msg, "Pod$o", outGateIndex);
+    }
+}
+
+void MEMS_Switch::togglePortState()
+{
+    for (int i = 0; i < numOfGate; i++) {
+        portActive[i] = !portActive[i];
+    }
+}
+
+simtime_t MEMS_Switch::getNextBlinkInterval()
+{
+    if (blinkDistribution == "exponential") {
+        double lambda = 1.0 / blinkInterval;  // 指数分布参数
+        double randomU = static_cast<double>(std::rand()) / RAND_MAX; // 生成 [0, 1) 随机数
+        return -std::log(1.0 - randomU) / lambda;
+    } else if (blinkDistribution == "uniform") {
+        double min = 0.5 * blinkInterval;
+        double max = 1.5 * blinkInterval;
+        return min + static_cast<double>(std::rand()) / RAND_MAX * (max - min);
+    } else if (blinkDistribution == "normal") {
+        // 简单实现 Box-Muller 方法生成正态分布随机数
+        double u1 = static_cast<double>(std::rand()) / RAND_MAX;
+        double u2 = static_cast<double>(std::rand()) / RAND_MAX;
+        double z = std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * M_PI * u2);
+        double mean = blinkInterval;
+        double stddev = 0.1 * blinkInterval;
+        return std::max(0.0, mean + z * stddev);  // 避免负值
+    } else {
+        error("Unsupported blink distribution: %s", blinkDistribution.c_str());
+    }
+}
+
+simtime_t MEMS_Switch::getNextBlinkDuration()
+{
+    if (blinkDistribution == "exponential") {
+        double lambda = 1.0 / blinkDuration;  // 指数分布参数
+        double randomU = static_cast<double>(std::rand()) / RAND_MAX; // 生成 [0, 1) 随机数
+        return -std::log(1.0 - randomU) / lambda;
+    } else if (blinkDistribution == "uniform") {
+        double min = 0.5 * blinkDuration;
+        double max = 1.5 * blinkDuration;
+        return min + static_cast<double>(std::rand()) / RAND_MAX * (max - min);
+    } else if (blinkDistribution == "normal") {
+        // 简单实现 Box-Muller 方法生成正态分布随机数
+        double u1 = static_cast<double>(std::rand()) / RAND_MAX;
+        double u2 = static_cast<double>(std::rand()) / RAND_MAX;
+        double z = std::sqrt(-2.0 * std::log(u1)) * std::cos(2.0 * M_PI * u2);
+        double mean = blinkDuration;
+        double stddev = 0.1 * blinkDuration;
+        return std::max(0.0, mean + z * stddev);  // 避免负值
+    } else {
+        error("Unsupported blink distribution: %s", blinkDistribution.c_str());
+    }
+}
+
+void MEMS_Switch::resetPortSend()
+{
+    portSend.assign(numOfGate,0);
+}
+void MEMS_Switch::resetPortTraffic()
+{
+    for(int i=0;i<numOfGate;i++){
+        pod_traffic[i].assign(numOfGate,0);
+        }
+
+}
+std::vector<int> MEMS_Switch::getPortSend()
+{
+    return portSend;
+}
+
+std::vector<std::vector<int>> MEMS_Switch::getPodTraffic()
+{
+    return pod_traffic;
+}
+
+void MEMS_Switch::finish()
+{
+    std::string baseName = "PortSend_";
+
+        for(unsigned int i=0;i<portSend.size();i++){
+            std::string temp = baseName + std::to_string(i);
+            recordScalar(temp.c_str(),portSend[i]);
+        }
+}
+
+};  // namespace dragonflyplus
+
+
+void MEMS_Switch::togglePortState()
+{
+    // 计算需要闪断的端口数量（至少 1 个端口）
+    int numPortsToBlink = std::max(1, static_cast<int>(numOfGate * 0.03));
+
+    // 创建一个端口索引数组（表示所有端口）
+    std::vector<int> portIndices(numOfGate);
+    for (int i = 0; i < numOfGate; ++i) {
+        portIndices[i] = i;
+    }
+
+    // 随机打乱端口索引数组
+    std::random_shuffle(portIndices.begin(), portIndices.end());
+
+    // 将所有端口状态重置为“活动”
+    for (int i = 0; i < numOfGate; ++i) {
+        portActive[i] = true;
+    }
+
+    // 选择前 numPortsToBlink 个端口进行闪断（设置为 inactive）
+    for (int i = 0; i < numPortsToBlink; ++i) {
+        int portIndex = portIndices[i];
+        portActive[portIndex] = false;  // 设置为闪断状态
+        std::cout << "Port " << portIndex << " of MEMS Switch " << getId()
+                  << " is now inactive." << std::endl;
+    }
+}
+
+class MEMS_Switch : public cSimpleModule
+{
+  private:
+    std::vector<std::vector<int>> faultMatrix;  // 8×8 故障统计矩阵
+    cMessage *clearMatrixMessage;  // 定时器，用于清空矩阵
+
+  protected:
+    virtual void initialize() override;
+    virtual void handleMessage(cMessage *msg) override;
+    void togglePortState();
+    void clearFaultMatrix();
+};
+
+void MEMS_Switch::initialize()
+{
+    numOfGate = gateSize("Pod");  // 每个 MEMS switch 的端口数量
+    outputGate.assign(numOfGate, -1);
+    portSend.assign(numOfGate, 0);
+    pod_traffic.resize(numOfGate);
+    for (int i = 0; i < numOfGate; ++i) {
+        pod_traffic[i].assign(numOfGate, 0);
+    }
+
+    // 初始化端口活动状态
+    portActive.assign(numOfGate, true);
+
+    // 初始化故障统计矩阵为 8×8，并填充为 0
+    faultMatrix.resize(8, std::vector<int>(8, 0));
+
+    // 初始化定时器
+    clearMatrixMessage = new cMessage("clearMatrix");
+    scheduleAt(simTime() + 1ms, clearMatrixMessage);  // 每 1ms 触发一次
+
+    // 其他初始化逻辑
+    ...
+}
+void MEMS_Switch::togglePortState()
+{
+    // 计算需要闪断的端口数量（至少 1 个端口）
+    int numPortsToBlink = std::max(1, static_cast<int>(numOfGate * 0.03));
+
+    // 创建一个端口索引数组
+    std::vector<int> portIndices(numOfGate);
+    for (int i = 0; i < numOfGate; ++i) {
+        portIndices[i] = i;
+    }
+
+    // 随机打乱端口索引数组
+    std::random_shuffle(portIndices.begin(), portIndices.end());
+
+    // 随机选择 numPortsToBlink 个端口闪断
+    for (int i = 0; i < numPortsToBlink; ++i) {
+        int portIndex = portIndices[i];
+        portActive[portIndex] = false;  // 切换为闪断状态
+
+        // 更新故障统计矩阵
+        int memsId = getId() % 8;  // 当前 MEMS switch 的 ID（映射到 0-7）
+        faultMatrix[memsId][portIndex]++;  // 增加故障次数
+
+        std::cout << "Port " << portIndex << " of MEMS Switch " << memsId
+                  << " is now inactive. Fault count: " << faultMatrix[memsId][portIndex] << std::endl;
+    }
+}
+void MEMS_Switch::clearFaultMatrix()
+{
+    // 清空矩阵，将所有元素置为 0
+    for (int i = 0; i < 8; ++i) {
+        for (int j = 0; j < 8; ++j) {
+            faultMatrix[i][j] = 0;
+        }
+    }
+
+    std::cout << "Fault matrix cleared at time " << simTime() << std::endl;
+}
+
+void MEMS_Switch::handleMessage(cMessage *msg)
+{
+    if (msg == clearMatrixMessage) {
+        clearFaultMatrix();  // 清空矩阵
+
+        // 调度下一次清空事件
+        scheduleAt(simTime() + 1ms, clearMatrixMessage);
+        return;
+    }
+
+    // 其他消息处理逻辑
+    ...
+}
+
+

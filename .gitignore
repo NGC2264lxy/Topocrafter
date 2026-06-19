@@ -1,0 +1,23 @@
+# Nested git metadata (use root repo only)
+**/.git/
+
+# OMNeT++ build output
+omnetCode/out/
+**/*.exe
+**/Makefile.bak
+
+# IDE / Eclipse metadata
+**/.metadata/
+**/.qtenvrc
+**/.settings/
+**/*.code-workspace
+
+# Python
+__pycache__/
+*.py[cod]
+*.pth
+fault/
+
+# OS
+.DS_Store
+Thumbs.db
